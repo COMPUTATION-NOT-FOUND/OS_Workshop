@@ -132,10 +132,64 @@ consoleread(int user_dst, uint64 dst, int n)
 // do erase/kill processing, append to cons.buf,
 // wake up consoleread() if a whole line has arrived.
 //
+#define HISTORY_SIZE 10
+// History buffer: 10 commands, each up to 128 bytes
+static char history[HISTORY_SIZE][INPUT_BUF_SIZE];
+static int history_count = 0;
+static int history_pos = 0;
+
+void browse_history(int direction) {
+    if(history_count == 0) return;
+
+    // 1. Update the current history position
+    history_pos += direction;
+    
+    // Clamp values (don't go past start or end)
+    if(history_pos < 0) history_pos = 0;
+    if(history_pos >= history_count) history_pos = history_count - 1;
+
+    // 2. Erase the current line on screen
+    // We assume the user hasn't pressed Enter yet, so we are editing 'cons.e'
+    while(cons.e != cons.w &&
+          cons.buf[(cons.e-1) % INPUT_BUF_SIZE] != '\n'){
+        cons.e--;
+        consputc(BACKSPACE); // Erase visual character
+    }
+
+    // 3. Copy the history command to the input buffer
+    char *cmd = history[history_pos % HISTORY_SIZE];
+    for(int i = 0; cmd[i]; i++){
+        cons.buf[cons.e++ % INPUT_BUF_SIZE] = cmd[i];
+        consputc(cmd[i]); // Echo back to screen
+    }
+}
+
+// Track the escape sequence state: 0=Normal, 1=Saw ESC, 2=Saw [
+static int esc_seq = 0; 
+
 void
 consoleintr(int c)
 {
   acquire(&cons.lock);
+
+  // Handle ANSI escape sequences for Arrow Keys
+  if(esc_seq) {
+    if(esc_seq == 1 && c == '['){ 
+        esc_seq = 2; 
+        release(&cons.lock); 
+        return; 
+    }
+    if(esc_seq == 2){
+      esc_seq = 0;
+      if(c == 'A') { browse_history(-1); release(&cons.lock); return; } // Up Arrow
+      if(c == 'B') { browse_history(1); release(&cons.lock); return; }  // Down Arrow
+    }
+    esc_seq = 0; // Reset if invalid sequence
+  } else if(c == '\x1b'){ // 0x1B is the ESC key
+    esc_seq = 1;
+    release(&cons.lock);
+    return;
+  }
 
   switch(c){
   case C('P'):  // Print process list.
@@ -170,6 +224,27 @@ consoleintr(int c)
         // has arrived.
         cons.w = cons.e;
         wakeup(&cons.r);
+
+        // Save line to history
+        int len = cons.e - cons.r;
+        if(len > 1){ // Don't save empty lines
+            
+            // Adjust len to remove the trailing newline if present
+            if(cons.buf[(cons.e - 1) % INPUT_BUF_SIZE] == '\n') {
+                len--; 
+            }
+
+            int idx = history_count % HISTORY_SIZE;
+            
+            // Copy from console buffer to history buffer
+            for(int i = 0; i < len; i++)
+              history[idx][i] = cons.buf[(cons.r + i) % INPUT_BUF_SIZE];
+            
+            history[idx][len] = 0; // Null-terminate string
+            history_count++;
+        }
+        // Reset position to the end for the new prompt
+        history_pos = history_count;
       }
     }
     break;
